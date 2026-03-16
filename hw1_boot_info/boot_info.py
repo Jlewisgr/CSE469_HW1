@@ -5,332 +5,198 @@
 # the editor while coding.
 import argparse
 import hashlib
-import json
 import os
 import struct
-import sys
 import csv
 
 SECTOR_SIZE = 512
 
 
-def load_partition_types():
-    """
-    Try to load MBR partition type names from JSON or CSV if present.
-    Falls back to a small built-in dictionary if no file exists.
-    """
-    built_in = {
-        "00": "Unused",
-        "01": "FAT12",
-        "02": "XENIX root",
-        "04": "FAT16 <32M",
-        "05": "Extended",
-        "06": "FAT16",
-        "07": "HPFS/NTFS/exFAT",
-        "0b": "W95 FAT32",
-        "0c": "W95 FAT32 (LBA)",
-        "0e": "W95 FAT16 (LBA)",
-        "0f": "W95 Ext'd (LBA)",
-        "82": "Linux swap / Solaris",
-        "83": "Linux",
-        "84": "Hibernation",
-        "85": "Linux extended",
-        "8e": "Linux LVM",
-        "a5": "FreeBSD",
-        "a8": "Mac OS X",
-        "ab": "Mac OS X Boot",
-        "af": "Mac OS X HFS",
-        "ee": "GPT Protective",
-        "ef": "EFI (FAT-12/16/32)",
-    }
+def compute_hashes(file_path, verbose=False):
+    if verbose:
+        print("Calculating MD5, SHA-256, and SHA-512 hashes...")
 
-    json_candidates = ["partition_types.json", "common_partition_types.json"]
-    csv_candidates = ["partition_types.csv", "common_partition_types.csv"]
-
-    for fname in json_candidates:
-        if os.path.exists(fname):
-            try:
-                with open(fname, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-
-                mapping = {}
-                if isinstance(data, dict):
-                    for k, v in data.items():
-                        mapping[k.lower().replace("0x", "").zfill(2)] = str(v)
-                elif isinstance(data, list):
-                    for row in data:
-                        if isinstance(row, dict):
-                            key = None
-                            value = None
-                            for kk in row.keys():
-                                low = kk.lower()
-                                if "id" in low or "hex" in low or "type" == low:
-                                    key = row[kk]
-                                if "name" in low or "description" in low:
-                                    value = row[kk]
-                            if key is not None and value is not None:
-                                mapping[str(key).lower().replace("0x", "").zfill(2)] = str(value)
-
-                if mapping:
-                    return mapping
-            except Exception:
-                pass
-
-    for fname in csv_candidates:
-        if os.path.exists(fname):
-            try:
-                mapping = {}
-                with open(fname, "r", encoding="utf-8", newline="") as f:
-                    reader = csv.DictReader(f)
-                    for row in reader:
-                        key = None
-                        value = None
-                        for kk in row.keys():
-                            low = kk.lower()
-                            if "id" in low or "hex" in low or low == "type":
-                                key = row[kk]
-                            if "name" in low or "description" in low:
-                                value = row[kk]
-                        if key is not None and value is not None:
-                            mapping[str(key).lower().replace("0x", "").zfill(2)] = str(value)
-
-                if mapping:
-                    return mapping
-            except Exception:
-                pass
-
-    return built_in
-
-
-PARTITION_TYPES = load_partition_types()
-
-
-def compute_hashes(file_path):
     md5 = hashlib.md5()
     sha256 = hashlib.sha256()
     sha512 = hashlib.sha512()
 
     with open(file_path, "rb") as f:
-        while True:
-            chunk = f.read(1024 * 1024)
-            if not chunk:
-                break
+        while chunk := f.read(4096):
             md5.update(chunk)
             sha256.update(chunk)
             sha512.update(chunk)
 
-    base = os.path.basename(file_path)
-    stem, _ = os.path.splitext(base)
+    filename = os.path.basename(file_path)
+    base = os.path.splitext(filename)[0]
 
-    with open(f"MD5-{stem}.txt", "w", encoding="utf-8") as f:
+    with open(f"MD5-{base}.txt", "w") as f:
         f.write(md5.hexdigest())
 
-    with open(f"SHA-256-{stem}.txt", "w", encoding="utf-8") as f:
+    with open(f"SHA-256-{base}.txt", "w") as f:
         f.write(sha256.hexdigest())
 
-    with open(f"SHA-512-{stem}.txt", "w", encoding="utf-8") as f:
+    with open(f"SHA-512-{base}.txt", "w") as f:
         f.write(sha512.hexdigest())
 
-
-def format_ascii(byte_seq):
-    chars = []
-    for b in byte_seq:
-        if 32 <= b <= 126:
-            chars.append(chr(b))
-        else:
-            chars.append(".")
-    return "  ".join(chars)
+    if verbose:
+        print("Hashes written to files.")
 
 
-def bytes_to_hex(byte_seq):
-    return " ".join(f"{b:02x}" for b in byte_seq)
+def load_partition_types():
+    partition_types = {}
+    try:
+        with open("partition_types.csv", newline='', encoding="utf-8") as f:
+            reader = csv.reader(f)
+            next(reader)
+            for row in reader:
+                partition_types[row[1].lower()] = row[2]
+    except:
+        pass
+    return partition_types
 
 
-def guid_bytes_to_string_raw(guid_bytes):
-    """
-    Assignment example shows GUID-like output as continuous hex without dashes.
-    GPT GUID fields are stored little-endian internally for the first 3 parts.
-    This function converts the 16 bytes into the standard GUID byte order, but
-    prints without dashes and uppercase.
-    """
-    if len(guid_bytes) != 16:
-        return ""
+def detect_partition_scheme(f, verbose=False):
+    if verbose:
+        print("Detecting partition scheme...")
 
-    d1 = struct.unpack("<I", guid_bytes[0:4])[0]
-    d2 = struct.unpack("<H", guid_bytes[4:6])[0]
-    d3 = struct.unpack("<H", guid_bytes[6:8])[0]
-    d4 = guid_bytes[8:10]
-    d5 = guid_bytes[10:16]
-
-    return f"{d1:08X}{d2:04X}{d3:04X}{d4.hex().upper()}{d5.hex().upper()}"
-
-
-def detect_partition_scheme(f):
     f.seek(0)
     mbr = f.read(SECTOR_SIZE)
 
-    # Protective MBR partition type 0xEE usually means GPT
-    protective = False
     for i in range(4):
-        entry = mbr[446 + i * 16: 446 + (i + 1) * 16]
-        p_type = entry[4]
-        if p_type == 0xEE:
-            protective = True
-            break
+        entry = mbr[446 + i*16 : 446 + (i+1)*16]
+        ptype = entry[4]
+        if ptype == 0xEE:
+            f.seek(SECTOR_SIZE)
+            if f.read(8) == b"EFI PART":
+                if verbose:
+                    print("Partition scheme detected: GPT")
+                return "GPT"
 
-    if protective:
-        f.seek(SECTOR_SIZE)
-        header = f.read(SECTOR_SIZE)
-        if header[0:8] == b"EFI PART":
-            return "GPT"
+    if verbose:
+        print("Partition scheme detected: MBR")
 
     return "MBR"
 
 
-def parse_mbr(f):
+def parse_mbr(f, offsets, partition_types, verbose=False):
+    if verbose:
+        print("Reading MBR partition table...")
+
     f.seek(0)
     mbr = f.read(SECTOR_SIZE)
 
     partitions = []
-    for i in range(4):
-        entry_offset = 446 + i * 16
-        entry = mbr[entry_offset: entry_offset + 16]
 
-        p_type = entry[4]
-        if p_type == 0x00:
+    for i in range(4):
+        entry = mbr[446 + i*16 : 446 + (i+1)*16]
+
+        ptype = entry[4]
+        if ptype == 0x00:
             continue
 
         start_lba = struct.unpack("<I", entry[8:12])[0]
-        size_sectors = struct.unpack("<I", entry[12:16])[0]
+        size = struct.unpack("<I", entry[12:16])[0]
 
-        type_hex = f"{p_type:02X}"
-        type_name = PARTITION_TYPES.get(type_hex.lower(), "Unknown")
+        hex_type = f"{ptype:02x}"
+        name = partition_types.get(hex_type, "Unknown")
 
-        partitions.append({
-            "number": len(partitions) + 1,
-            "type_hex": type_hex,
-            "type_name": type_name,
-            "start_lba": start_lba,
-            "size_sectors": size_sectors,
-        })
+        print(f"({hex_type.upper()}), {name}, {start_lba}, {size}")
 
-    return partitions
+        partitions.append((start_lba, i+1))
 
-
-def print_mbr_info(f, partitions, offsets):
-    for p in partitions:
-        print(f"({p['type_hex']}), {p['type_name']}, {p['start_lba']}, {p['size_sectors']}")
-
-    for idx, p in enumerate(partitions):
+    for idx, (start_lba, pnum) in enumerate(partitions):
         if idx >= len(offsets):
             break
 
         offset = offsets[idx]
-        boot_record_offset = p["start_lba"] * SECTOR_SIZE
 
-        f.seek(boot_record_offset)
-        boot_sector = f.read(SECTOR_SIZE)
+        if verbose:
+            print(f"Reading boot record for partition {pnum} at offset {offset}")
 
-        # Graceful handling if offset is outside the sector
-        if offset < 0:
-            data = b""
-        else:
-            data = boot_sector[offset:offset + 16]
+        f.seek(start_lba * SECTOR_SIZE)
+        sector = f.read(SECTOR_SIZE)
 
-        if len(data) < 16:
-            data = data + b"\x00" * (16 - len(data))
+        data = sector[offset:offset+16]
 
-        print(f"Partition number: {idx + 1}")
-        print(f"16 bytes of boot record from offset {offset}: {bytes_to_hex(data)}")
-        print(f"ASCII:                                    {format_ascii(data)}")
+        hex_values = " ".join(f"{b:02x}" for b in data)
+
+        ascii_values = "  ".join(chr(b) if 32 <= b <= 126 else "." for b in data)
+
+        print(f"Partition number: {pnum}")
+        print(f"16 bytes of boot record from offset {offset}: {hex_values}")
+        print(f"ASCII:                                    {ascii_values}")
 
 
-def parse_gpt(f):
+def parse_gpt(f, verbose=False):
+    if verbose:
+        print("Reading GPT header...")
+
     f.seek(SECTOR_SIZE)
     header = f.read(SECTOR_SIZE)
 
-    if header[0:8] != b"EFI PART":
-        return []
-
-    partition_entry_lba = struct.unpack("<Q", header[72:80])[0]
+    part_lba = struct.unpack("<Q", header[72:80])[0]
     num_entries = struct.unpack("<I", header[80:84])[0]
     entry_size = struct.unpack("<I", header[84:88])[0]
 
-    partitions = []
+    if verbose:
+        print("GPT partition entries start at LBA:", part_lba)
 
-    entry_array_offset = partition_entry_lba * SECTOR_SIZE
-    f.seek(entry_array_offset)
+    f.seek(part_lba * SECTOR_SIZE)
 
-    for i in range(num_entries):
+    partition_number = 1
+
+    for _ in range(num_entries):
         entry = f.read(entry_size)
-        if len(entry) < entry_size:
-            break
 
         part_type_guid = entry[0:16]
-        if part_type_guid == b"\x00" * 16:
+
+        if part_type_guid == b"\x00"*16:
             continue
 
         first_lba = struct.unpack("<Q", entry[32:40])[0]
         last_lba = struct.unpack("<Q", entry[40:48])[0]
-        name_raw = entry[56:128]
 
-        try:
-            part_name = name_raw.decode("utf-16le").rstrip("\x00")
-        except UnicodeDecodeError:
-            part_name = ""
+        name = entry[56:128].decode("utf-16le").rstrip("\x00")
 
         size_bytes = (last_lba - first_lba + 1) * SECTOR_SIZE
 
-        partitions.append({
-            "number": len(partitions) + 1,
-            "type_guid": guid_bytes_to_string_raw(part_type_guid),
-            "first_lba": first_lba,
-            "last_lba": last_lba,
-            "name": part_name,
-            "size_bytes": size_bytes,
-        })
+        guid = part_type_guid.hex().upper()
 
-    return partitions
-
-
-def print_gpt_info(partitions):
-    for p in partitions:
-        print(f"Partition number: {p['number']}")
-        print(f"Partition Type GUID : {p['type_guid']}")
-        print(f"Starting LBA in hex: {hex(p['first_lba'])}")
-        print(f"ending LBA in hex: {hex(p['last_lba'])}")
-        print(f"starting LBA in Decimal: {p['first_lba']}")
-        print(f"ending LBA in Decimal: {p['last_lba']}")
-        print(f"Partition name: {p['name']}")
-        print(f"Partition size in bytes: {p['size_bytes']}")
+        print(f"Partition number: {partition_number}")
+        print(f"Partition Type GUID : {guid}")
+        print(f"Starting LBA in hex: {hex(first_lba)}")
+        print(f"ending LBA in hex: {hex(last_lba)}")
+        print(f"starting LBA in Decimal: {first_lba}")
+        print(f"ending LBA in Decimal: {last_lba}")
+        print(f"Partition name: {name}")
+        print(f"Partition size in bytes: {size_bytes}")
         print()
 
-
-def parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-f", required=True, help="Path to raw image")
-    parser.add_argument("-o", nargs="*", type=int, default=[], help="Offsets for MBR partitions")
-    return parser.parse_args()
+        partition_number += 1
 
 
 def main():
-    args = parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-f", required=True, help="Raw disk image")
+    parser.add_argument("-o", nargs="*", type=int, default=[], help="Offsets for MBR partitions")
+    parser.add_argument("--verbose", action="store_true", help="Enable verbose output")
 
-    if not os.path.exists(args.f):
-        print(f"Error: file not found: {args.f}", file=sys.stderr)
-        sys.exit(1)
+    args = parser.parse_args()
 
-    compute_hashes(args.f)
+    if args.verbose:
+        print("Opening disk image:", args.f)
+
+    compute_hashes(args.f, args.verbose)
+
+    partition_types = load_partition_types()
 
     with open(args.f, "rb") as f:
-        scheme = detect_partition_scheme(f)
+        scheme = detect_partition_scheme(f, args.verbose)
 
         if scheme == "MBR":
-            partitions = parse_mbr(f)
-            print_mbr_info(f, partitions, args.o)
+            parse_mbr(f, args.o, partition_types, args.verbose)
         else:
-            partitions = parse_gpt(f)
-            print_gpt_info(partitions)
+            parse_gpt(f, args.verbose)
 
 
 if __name__ == "__main__":
